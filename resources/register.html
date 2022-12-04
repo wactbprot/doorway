@@ -1,0 +1,69 @@
+<!doctype html>
+<html>
+<head>
+    ... 
+    <script type="application/javascript">
+        $ = jQuery;
+        $(function () {
+            const publicKeyCredentialCreationOptions = (server, email) => ({
+                challenge: Uint8Array.from(
+                    server.challenge, c => c.charCodeAt(0)),
+                rp: {
+                    name: server.rp.name,
+                    id: server.rp.id,
+                },
+                user: {
+                    id: Uint8Array.from(
+                       server.user.id, c => c.charCodeAt(0)),
+                    displayName: 'Foobar',
+                    name: email,
+                },
+                pubKeyCredParams: server.cred,
+                authenticatorSelection: {
+                    authenticatorAttachment: "platform",
+                    userVerification: 'discouraged',
+                },
+                timeout: 60000,
+                attestation: "direct"
+            });
+
+            $("#register").click(function (e) {
+                const email = $("#email").val();
+                e.preventDefault();
+                $.get("/webauthn/register?email=" + email)
+                    .then(resp => $.parseJSON(resp))
+                    .then(async resp => {
+                        const pubKey = publicKeyCredentialCreationOptions(resp, email);
+                        const creds = await navigator.credentials.create({publicKey: pubKey});
+                        return {
+                            "challenge": resp.challenge, 
+                            "attestation": btoa(String.fromCharCode(...new Uint8Array(creds.response.attestationObject))),
+                            "client-data": btoa(String.fromCharCode(...new Uint8Array(creds.response.clientDataJSON))),
+                        };
+                    })
+                    .then(payload => {
+                        $.ajax({
+                            url: "/webauthn/register",
+                            type: "POST",
+                            data: JSON.stringify(payload),
+                            contentType: "application/json",
+                            success: function (resp) {
+                                alert('You are now registered.');
+                            }
+                        });
+                    });
+            })
+        })
+    </script>
+</head>
+<body>
+...
+<form>
+    <label for="email">E-mail:</label>
+    <input type="text" id="email" name="email" autocomplete="off" />
+
+    <button class="btn btn-primary" id="register">Register</button>
+</form>
+...
+</body>
+</html>
