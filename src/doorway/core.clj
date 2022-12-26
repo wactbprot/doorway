@@ -8,9 +8,10 @@
             [clojure.java.io :as io]
             [compojure.core :refer [defroutes context GET POST]]
             [ring.adapter.jetty :refer [run-jetty]]
+            [ring.middleware.json :refer [wrap-json-body]]
             [ring.middleware.session :refer [wrap-session]]
             [ring.middleware.params :refer [wrap-params]]
-            [ring.util.response :refer [response redirect]]
+            [ring.util.response :refer [created status response redirect]]
             [clojure.data.json :as json])
   (:import (java.util UUID)))
 
@@ -41,38 +42,38 @@
   (-> req
       (get-in [:params "email"])           ; get ?email=
       (webauthn/prepare-registration site) ; prepare the registration for this site and email
-      clojure.data.json/write-str           
+      json/write-str           
       response))                           ; outputs the result as JSON
 
 ;; this is the POST /webauthn/login function
 (defn do-register [req]
-  (let [payload (-> req :body (json/read-str :key-fn keyword))]         ; get payload
+  (let [payload (-> req :body)]         ; get payload
     (if-let [user (webauthn/register-user payload site register-user!)] ; register user 
-      (ring.util.response/created "/login" (json/write-str user))       ; 201, and redirect to /login
-      (ring.util.response/status 500))))                                ; 500, if something goes wrong
+      (created "/login" (json/write-str user))       ; 201, and redirect to /login
+      (status 500))))                                ; 500, if something goes wrong
 
 ;; this is the GET /webauthn/register?email=... function
 (defn do-prepare-login [req]
   (let [email (get-in req [:params "email"])]                     ; get the email
     (if-let [resp (webauthn/prepare-login email                   ; prepare for login (create challenge) 
-                (fn [email] (:authenticator (get-user email))))]  ; retrieve the authenticator in our database
+                 (fn [email] (:authenticator (get-user email))))]  ; retrieve the authenticator in our database
       (response (json/write-str resp))                            ; 200 and outputs JSON if everything ok
-      (ring.util.response/status
+      (status
         (json/write-str {:message 
              (str "Cannot prepare login for user: " email)}) 500))))  ; 500 in case something goes wrong
 
-;; this is the POST /webauthn/register function
+;; this is the POST /webauthn/login function
 (defn do-login [{session :session :as req}]
-  (let [payload (-> req :body (json/read-str :key-fn keyword))]  ; get payload
-    (let [email (cljwebauthn.b64/decode (:user-handle payload))  ; decode the 'user-handle' which is the email 
+    (let [payload (-> req :body)
+          email (cljwebauthn.b64/decode (:user-handle payload))  ; decode the 'user-handle' which is the email 
           user (get-user email)                                  ; retrieve the user from database
           auth (:authenticator user)]                            ; and get its authenticator
       (if-let [log (webauthn/login-user payload site             ; try to login the user by verifying the signature etc.
-                 (fn [email] auth))]
-        (assoc (redirect "/") :session 
-            (assoc session :identity 
-               (select-keys user [:id :email])))                 ; add the user to our session so that it can be authenticated later on
-        (redirect "/login")))))                                  ; redirect to login if the user could not log-in
+                                        (fn [email] auth))]
+        (assoc (response "loged in, place app here") :session 
+               (assoc session :identity 
+                      (select-keys user [:id :email])))         ; add the user to our session so that it can be authenticated later on
+        (redirect "/login"))))                                  ; redirect to login if the user could not log-in
 
 ;; check if a user is authenticated
 (defn is-authenticated [{:keys [user]}]
@@ -85,7 +86,7 @@
 
 ;; log out the user
 (defn do-logout [{session :session}]
-  (assoc (redirect "/login")               ; redirect to /login
+  (assoc (redirect "/login")                    ; redirect to /login
          :session (dissoc session :identity)))  ; but first discard the session
 
 (defroutes admin-routes
@@ -97,7 +98,7 @@
     (GET "/" [] (fn [_] (slurp (io/resource "index.html"))))             ; home page
     (GET "/register" [] (fn [_] (slurp (io/resource "register.html"))))  ; register page 
     (GET "/login" [] (fn [_] (slurp (io/resource "login.html"))))        ; login page
-    (GET "/logout" [] do-logout)          ; logout page
+    (GET "/logout" [] do-logout)                                        ; logout page
     
     (context "/webauthn" []                    ; /webauthn
       (GET "/register" [] do-prepare-register) ; prepare registration endpoint
@@ -105,15 +106,20 @@
       (GET "/login" [] do-prepare-login)       ; prepare login endpoint
       (POST "/login" [] do-login)))            ; login endpoint
 
-(def my-app
+(def app
   (let [backend (session-backend)]     ; enable session management
     (-> #'app-routes
         (wrap-user)                    ; wrap authenticated user if present
+        (wrap-json-body {:keywords? true})
         (wrap-authentication backend)  ; buddy authentication
         (wrap-authorization backend)   ; buddy authorization
         (wrap-session)                 ; wrap session
         (wrap-params))))               ; and request params
 
-(defn -main []
-  (run-jetty my-app {:port 8080 :host "localhost"}))
+(def sys (atom nil))
 
+(defn start []
+  (reset! sys (run-jetty app {:join? false :port 8080 :host "localhost"})))
+
+(defn stop []
+  (.stop @sys))
